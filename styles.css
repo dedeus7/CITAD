@@ -240,3 +240,4 @@ body.svhurt .sv-bg{background:radial-gradient(800px 520px at 50% -140px,#b0102e 
 .btn.go{background:linear-gradient(90deg,#ff4d6d,#9b2cff);color:#fff;box-shadow:0 5px 0 #4a1030;font-size:19px}
 .phase{font-size:26px}
 .pbtn.wsel{border-color:#ff4d6d;background:#3a1420}
+select{width:100%;font:700 16px Rubik,sans-serif;padding:12px 14px;border-radius:12px;border:2px solid var(--line);background:var(--panel2);color:var(--text);-webkit-appearance:none;appearance:none}

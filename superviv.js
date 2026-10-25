@@ -1,7 +1,7 @@
 /* Supervivencia: variante de combate con personajes secretos, vidas, Ataque y Armadura */
 Party.register({
-  id: 'superviv', name: 'Supervivencia', emoji: '🩸', players: '2-8', min: 2, wide: true,
-  desc: '12 criaturas secretas, 7 vidas cada uno, cartas de Ataque y Armadura. El último en pie gana.',
+  id: 'superviv', name: 'Supervivencia', emoji: '🩸', players: '1-8', min: 1, wide: true,
+  desc: '12 criaturas secretas, 7 vidas cada uno, cartas de Ataque y Armadura. El último en pie gana. Se puede jugar contra bots.',
   create(P) {
 'use strict';
 
@@ -19,8 +19,10 @@ const room = P.room;
 let screen = '';
 function show(name, html) { screen = name; app.innerHTML = html; }
 function on(sel, ev, fn) { const el = typeof sel === 'string' ? $(sel) : sel; if (el) el.addEventListener(ev, fn); }
-const send = (id, m) => P.send(id, m), broadcast = m => P.broadcast(m), toHost = m => P.toHost(m);
-const pl = id => players.find(p => p.id === id) || room.players.find(p => p.id === id) || { name: '¿?', color: '#888' };
+const send = (id, m) => { if (!String(id).startsWith('bot')) P.send(id, m); }, broadcast = m => P.broadcast(m), toHost = m => P.toHost(m);
+let BOTS = {}; // id -> {name, color}
+const pl = id => players.find(p => p.id === id) || room.players.find(p => p.id === id) || BOTS[id] || { name: '¿?', color: '#888' };
+const isBot = id => !!BOTS[id] && id.startsWith('bot');
 const nm = id => esc(pl(id).name);
 const chip = id => `<b style="color:${pl(id).color}">${nm(id)}</b>`;
 
@@ -78,14 +80,19 @@ const K = id => KIND[CARDS[id]];
 /* =====================================================
    ANFITRIÓN
    ===================================================== */
+const BOT_NAMES = [['🤖 Drácula', '#c0392b'], ['🤖 Morgana', '#8e44ad'], ['🤖 Nosferatu', '#7f8c8d'], ['🤖 Lilith', '#e84393'], ['🤖 Grendel', '#27ae60'], ['🤖 Baba Yaga', '#d35400'], ['🤖 Kraken', '#2980b9'], ['🤖 Banshee', '#16a085']];
+let settings = { bots: 0 };
 let S = null;
-const inRoom = id => room.players.some(p => p.id === id);
+const inRoom = id => room.players.some(p => p.id === id) || isBot(id);
 const alive = () => S.order.filter(id => inRoom(id) && S.lives[id] > 0);
 const holder = r => S.owner[r];
 function log(txt) { S.log.push(txt); if (S.log.length > 80) S.log.shift(); }
 function hostBegin() {
-  const ids = room.players.map(p => p.id);
-  if (ids.length < 2) { toast('Hacen falta al menos 2 jugadores'); return; }
+  const humans = room.players.map(p => p.id);
+  const nb = Math.max(0, Math.min(settings.bots, 8 - humans.length));
+  BOTS = {}; shuffle(BOT_NAMES).slice(0, nb).forEach((b, i) => { BOTS['bot' + (i + 1)] = { name: b[0], color: b[1] }; });
+  const ids = humans.concat(Object.keys(BOTS));
+  if (ids.length < 2) { toast('Añade al menos un bot o espera a otro jugador'); return; }
   if (ids.length > 8) { toast('Máximo 8 jugadores'); return; }
   S = { order: shuffle(ids), deck: shuffle(CARDS.map((_, i) => i)), discard: [], gold: {}, hand: {}, lives: {}, armor: {}, chars: {}, round: 0, log: [], phase: 'draft', revived: {}, out: [], first: null };
   ids.forEach(id => { S.gold[id] = R.startGold; S.lives[id] = R.lives; S.armor[id] = 0; S.hand[id] = []; });
@@ -294,7 +301,7 @@ function hostAct(id, m) {
 function sync(extra) {
   const pub = {
     phase: S.phase, round: S.round, log: S.log.slice(-16), petrified: S.petrified, rank: S.rank, revealed: S.revealed, deck: S.deck.length,
-    doom: S.round >= R.doomRound,
+    doom: S.round >= R.doomRound, bots: BOTS,
     draft: S.phase === 'draft' ? { faceUp: S.draft.faceUp, picking: S.draft.queue[0] } : null,
     turn: S.turn ? { id: S.turn.id, rank: S.turn.rank, acted: S.turn.acted, attacked: S.turn.attacked, armored: S.turn.armored, ability: S.turn.ability, choosing: !!S.turn.choose } : null,
     ps: S.order.filter(inRoom).map(id => ({ id, gold: S.gold[id], cards: S.hand[id].length, lives: S.lives[id], armor: S.armor[id], revived: !!S.revived[id] })),
@@ -305,6 +312,64 @@ function sync(extra) {
     avail: S.phase === 'draft' && S.draft.queue[0] === id ? S.draft.avail : null,
     choose: S.turn && S.turn.id === id ? S.turn.choose : null,
   } }));
+  scheduleBot();
+}
+/* ---------- IA sencilla para los bots ---------- */
+let botTimer = null, botSteps = 0, botKey = '';
+function scheduleBot() {
+  clearTimeout(botTimer);
+  if (!S || S.phase === 'end') return;
+  const who = S.phase === 'draft' ? S.draft.queue[0] : S.turn && S.turn.id;
+  if (!who || !isBot(who)) return;
+  const key = S.phase + S.round + ':' + S.rank + ':' + who;
+  if (key !== botKey) { botKey = key; botSteps = 0; }
+  botTimer = setTimeout(() => {
+    try { botMove(who); } catch (e) { console.warn('bot', e); }
+    // si la acción no cambió nada (rechazada), volver a intentarlo: el contador acaba terminando el turno
+    const now = S && S.phase !== 'end' && (S.phase === 'draft' ? S.draft.queue[0] : S.turn && S.turn.id);
+    if (now === who) scheduleBot();
+  }, humansAlive() ? (S.phase === 'draft' ? 600 : 650 + Math.random() * 450) : 200); // si solo quedan bots, van rápido
+}
+const pickR = a => a[Math.floor(Math.random() * a.length)];
+const humansAlive = () => alive().some(id => !isBot(id));
+function botMove(id) {
+  if (!S || S.phase === 'end') return;
+  if (S.phase === 'draft') {
+    if (S.draft.queue[0] !== id) return;
+    const av = S.draft.avail, hurtMe = S.lives[id] <= 3;
+    const pref = av.filter(r => hurtMe ? [9, 8, 7, 6].includes(r) : [11, 10, 1, 3, 12].includes(r));
+    return hostPick(id, (pref.length && Math.random() < 0.6 ? pickR(pref) : pickR(av)));
+  }
+  const T = S.turn; if (!T || T.id !== id) return;
+  const r = T.rank, hand = S.hand[id], gold = S.gold[id];
+  const foes = alive().filter(x => x !== id);
+  const weakest = (ign) => foes.slice().sort((a, b) => (S.lives[a] + (ign ? 0 : S.armor[a])) - (S.lives[b] + (ign ? 0 : S.armor[b])));
+  const can = t => hand.filter(c => K(c).t === t && K(c).k <= gold).sort((a, b) => K(b).v - K(a).v);
+  const doIt = m => hostAct(id, m);
+  if (++botSteps > 10) return doIt(T.acted ? { a: 'end' } : { a: 'gold' });
+  if (T.choose) {
+    const wantArm = S.armor[id] < 2;
+    const best = T.choose.slice().sort((a, b) => ((K(b).t === 'arm') === wantArm) - ((K(a).t === 'arm') === wantArm) || K(b).v - K(a).v)[0];
+    return doIt({ a: 'keep', card: best });
+  }
+  if (!T.acted) return doIt({ a: hand.length < 2 || (gold >= 3 && Math.random() < 0.5) ? 'draw' : 'gold' });
+  if (!T.ability) {
+    if (r === 1) return doIt({ a: 'petrify', rank: pickR([3, 7, 8, 9, 10, 11, 12].filter(x => !S.chars[id].includes(x))) });
+    if (r === 5 && foes.length) return doIt({ a: 'sing', target: weakest(true)[0] });
+    if (r === 9) { const ally = S.lives[id] < R.maxLives ? id : null; if (ally) return doIt({ a: 'angel', target: ally }); }
+    if (r === 12 && S.lives[id] > R.levCost + 2 && foes.length >= 2) return doIt({ a: 'wave' });
+  }
+  const arm = can('arm');
+  if (!T.armored && arm.length && S.armor[id] < 3) return doIt({ a: 'armor', card: arm[0] });
+  const atk = can('atk');
+  if (!T.attacked && atk.length && foes.length) {
+    const tg = weakest(r === 3);
+    // el Fantasma no ataca a quien ya se ha revelado como Cazador
+    const list = r === 3 ? tg.filter(x => S.revealed[4] !== x) : tg;
+    if (list.length) return doIt({ a: 'attack', card: atk[0], targets: list.slice(0, r === 10 ? R.demonTargets : 1) });
+  }
+  if (!T.armored && arm.length && S.armor[id] < R.maxArmor) return doIt({ a: 'armor', card: arm[0] });
+  return doIt({ a: 'end' });
 }
 function hostLeave(id) {
   if (!S || S.phase === 'end') return;
@@ -338,7 +403,10 @@ function renderSetup() {
   show('setup', `${bg()}
     <div class="hubtop"><h1>🩸 Super<span>vivencia</span></h1><div class="codechip"><b>${esc(P.code)}</b></div></div>
     <div class="card"><div class="svprev">${RANKS.map(r => `<div class="svpc"><span>${CHAR[r].e}</span><small>${r}</small></div>`).join('')}</div></div>
-    ${isHost ? `<button class="btn go" id="go">🩸 Empezar la noche</button>${P.homeButton()}` : '<div class="card" style="text-align:center"><b>Esperando al anfitrión…</b></div>'}
+    ${isHost ? `<div class="card"><label class="lbl" style="margin-top:0">🤖 Bots (rivales controlados por la máquina)</label>
+      <select id="bots">${[0, 1, 2, 3, 4, 5, 6, 7].filter(n => n + room.players.length <= 8).map(n => `<option value="${n}"${settings.bots === n ? ' selected' : ''}>${n === 0 ? 'Sin bots' : n + ' bot' + (n === 1 ? '' : 's')}</option>`).join('')}</select>
+      <div class="mute" style="font-size:12px;margin-top:6px">${room.players.length} persona${room.players.length === 1 ? '' : 's'} en la sala${settings.bots ? ` + ${settings.bots} bot${settings.bots === 1 ? '' : 's'}` : ''}. Los bots no son muy listos, pero sirven para probar.</div></div>
+      <button class="btn go" id="go">🩸 Empezar la noche</button>${P.homeButton()}` : `<div class="card" style="text-align:center"><b>Esperando al anfitrión…</b>${settings.bots ? `<div class="mute" style="font-size:13px;margin-top:4px">Jugaréis con ${settings.bots} bot${settings.bots === 1 ? '' : 's'}</div>` : ''}</div>`}
     <div class="card"><h3 style="margin-bottom:8px">Cómo se juega</h3><ul class="rules">
       <li>Empiezas con <b>${R.lives} vidas ❤️</b>, ${R.startGold} de oro y ${R.startCards} cartas. Hay cartas de <b>Ataque ⚔️</b> y de <b>Armadura 🛡️</b>; cada una cuesta el oro que marca.</li>
       <li>Cada ronda, empezando por el <b>más herido</b>, cada uno elige <b>en secreto</b> una criatura (con 2-3 jugadores, dos). Hay una oculta y algunas fuera de juego.</li>
@@ -346,7 +414,7 @@ function renderSetup() {
       <li>El daño gasta primero la <b>armadura</b> (máx. ${R.maxArmor}) y luego las vidas. A 0 vidas, quedas fuera… salvo que un Ángel te devuelva a la vida.</li>
       <li>Desde la ronda ${R.doomRound}, la noche eterna quita 1 vida a todos al final de cada ronda. <b>El último en pie gana.</b></li>
     </ul></div>`);
-  if (isHost) { on('#go', 'click', () => { audio(); hostBegin(); }); P.bindHome(); }
+  if (isHost) { on('#bots', 'change', e => { settings.bots = +e.target.value; broadcast({ t: 'set', settings }); }); on('#go', 'click', () => { audio(); hostBegin(); }); P.bindHome(); }
 }
 function overlay(html) {
   const ov = document.createElement('div'); ov.className = 'svov';
@@ -470,12 +538,13 @@ function renderEnd() {
 
 function onMsg(m) {
   switch (m.t) {
-    case 'setup': S = null; G = null; ui = { mode: null, card: null, tg: [] }; renderSetup(); break;
+    case 'set': settings = m.settings; if (screen === 'setup') renderSetup(); break;
+    case 'setup': clearTimeout(botTimer); S = null; G = null; ui = { mode: null, card: null, tg: [] }; renderSetup(); break;
     case 'st': {
       const prevTurn = G && G.turn && G.turn.id === myId && G.turn.rank;
       const prevPick = G && G.phase === 'draft' && G.draft.picking === myId;
       const prevMe = G && G.ps.find(p => p.id === myId);
-      G = m.pub; ME = m.me;
+      G = m.pub; ME = m.me; if (!isHost) BOTS = G.bots || {};
       const now = G.ps.find(p => p.id === myId);
       if (prevMe && now && now.lives < prevMe.lives) { buzz([120, 60, 120]); document.body.classList.add('svhurt'); setTimeout(() => document.body.classList.remove('svhurt'), 450); }
       if (prevMe && now && now.lives > prevMe.lives) SFX.heal();
@@ -493,12 +562,12 @@ function onMsg(m) {
 
 if (location.hash === '#debug') { window.__S = () => S; window.__SV = { R, CHAR, CARDS, KIND, hurt: (...a) => hurt(...a) }; }
 return {
-  open() { renderSetup(); },
+  open() { if (isHost) { if (room.players.length === 1 && !settings.bots) settings.bots = 3; settings.bots = Math.min(settings.bots, 8 - room.players.length); broadcast({ t: 'set', settings }); } renderSetup(); },
   onMsg,
   onHost: (id, m) => hostHandle(id, m),
-  onPlayers(list) { players = list; if (screen === 'setup') renderSetup(); },
+  onPlayers(list) { players = list; if (isHost && settings.bots + room.players.length > 8) { settings.bots = 8 - room.players.length; broadcast({ t: 'set', settings }); } if (screen === 'setup') renderSetup(); },
   onLeave: hostLeave,
-  destroy() { S = null; G = null; $$('.svov').forEach(e => e.remove()); },
+  destroy() { clearTimeout(botTimer); S = null; G = null; $$('.svov').forEach(e => e.remove()); },
 };
   }
 });
